@@ -5,7 +5,6 @@ import paramiko
 import os
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
-
 class SshWorker(QObject):
     """
     Handles all Paramiko network operations in a separate thread.
