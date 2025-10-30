@@ -23,6 +23,9 @@ from PyQt6.QtGui import QIcon, QFont
 from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal
 from mobatuxtermfiles.ssh_worker import SshWorker
 
+APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(APP_ROOT_DIR) # <--- ADD THIS LINE
+
 class ConnectionDialog(QDialog):
     """
     A dialog box to get SSH connection details from the user.
@@ -117,11 +120,12 @@ class SessionManagerDialog(QDialog):
     """
     # Define the directory
     CONFIG_DIR = "mobatuxtermfiles"
-    SESSIONS_FILE = os.path.join(CONFIG_DIR, "mobatuxterm_sessions.json")
+    SESSIONS_FILE = os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "mobatuxterm_sessions.json")
 
     def __init__(self, parent=None):
-        # Ensure the config directory exists
-        os.makedirs(self.CONFIG_DIR, exist_ok=True)
+        # Get the full, absolute path to the directory for the session file
+        session_dir = os.path.dirname(self.SESSIONS_FILE)
+        os.makedirs(session_dir, exist_ok=True)
         super().__init__(parent)
         self.setWindowTitle("MobaTuxTerm Session Manager")
         self.setMinimumWidth(400)
@@ -834,7 +838,7 @@ QScrollBar::handle:horizontal {
 if __name__ == "__main__":
     app = QApplication(sys.argv)
 
-    app_icon = QIcon(os.path.join("mobatuxtermfiles", "ionos-logo.png"))
+    app_icon = QIcon(os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "ionos-logo.png"))
     app.setWindowIcon(app_icon)
     app.setStyleSheet(IONOS_DARK_THEME)
     window = MainWindow() # This now handles the session dialog
