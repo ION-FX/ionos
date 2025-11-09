@@ -19,8 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QInputDialog
 )
 from PyQt6.QtGui import QIcon, QFont
-# Added QTimer to imports here
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer
 from mobatuxtermfiles.ssh_worker import SshWorker
 
 APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -302,6 +301,7 @@ class SessionManagerDialog(QDialog):
 
     def get_selected_session(self):
         return self.selected_session_details
+
 class UpdateChecker(QThread):
     """
     Checks a raw text file on GitHub for version number.
@@ -314,7 +314,6 @@ class UpdateChecker(QThread):
     def run(self):
         try:
             # 1. Get remote version
-            # Timeout is important so it doesn't hang if GitHub is slow
             with urllib.request.urlopen(self.VERSION_URL, timeout=5) as response:
                 remote_ver_str = response.read().decode('utf-8').strip()
                 remote_ver = int(remote_ver_str)
@@ -325,7 +324,7 @@ class UpdateChecker(QThread):
                     local_ver_str = f.read().strip()
                     local_ver = int(local_ver_str)
             else:
-                # If local file is missing, assume version 0 and force update
+                # If local file is missing, assume version 0
                 local_ver = 0
 
             # 3. Compare
@@ -333,10 +332,65 @@ class UpdateChecker(QThread):
                 self.update_available.emit(remote_ver_str)
 
         except Exception as e:
-            # Fail silently in the background if no internet or bad URL
             print(f"Update check failed: {e}")
 
+class AppUpdater(QThread):
+    """
+    Downloads new versions of specific files from GitHub and replaces the local ones.
+    """
+    update_finished = pyqtSignal(bool, str) # success, message
+    update_progress = pyqtSignal(int)
 
+    BASE_URL = "https://raw.githubusercontent.com/ION-FX/ionos/main/apps/mobatuxterm/"
+    # List of files to update relative to APP_ROOT_DIR
+    FILES_TO_UPDATE = [
+        "mobatuxterm.py",
+        "mobatuxtermfiles/ssh_worker.py",
+        "mobatuxtermfiles/version.txt"
+    ]
+
+    def run(self):
+        try:
+            total_files = len(self.FILES_TO_UPDATE)
+            # 1. Download all to .tmp first (safe approach)
+            for i, rel_path in enumerate(self.FILES_TO_UPDATE):
+                url = self.BASE_URL + rel_path
+                local_path = os.path.join(APP_ROOT_DIR, rel_path)
+                tmp_path = local_path + ".tmp"
+
+                # Ensure directory exists (important if we add new subfolders later)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+
+                # Download
+                with urllib.request.urlopen(url, timeout=10) as response, open(tmp_path, 'wb') as out_file:
+                    out_file.write(response.read())
+                
+                # Calculate roughly 50% progress for downloading
+                progress = int(((i + 1) / total_files) * 50)
+                self.update_progress.emit(progress)
+
+            # 2. If we got here, all downloads succeeded. Perform the swap.
+            for i, rel_path in enumerate(self.FILES_TO_UPDATE):
+                local_path = os.path.join(APP_ROOT_DIR, rel_path)
+                tmp_path = local_path + ".tmp"
+                
+                # On Linux, os.rename is atomic and can overwrite running files safely
+                os.rename(tmp_path, local_path)
+
+                # Calculate remaining 50% progress for installing
+                progress = 50 + int(((i + 1) / total_files) * 50)
+                self.update_progress.emit(progress)
+
+            self.update_finished.emit(True, "Update successfully installed!\nPlease restart MobaTuxTerm.")
+
+        except Exception as e:
+            # Clean up any .tmp files if it failed
+            for rel_path in self.FILES_TO_UPDATE:
+                 tmp_path = os.path.join(APP_ROOT_DIR, rel_path) + ".tmp"
+                 if os.path.exists(tmp_path):
+                     try: os.remove(tmp_path)
+                     except: pass
+            self.update_finished.emit(False, f"Update failed:\n{e}")
 
 class MainWindow(QMainWindow):
     """
@@ -363,7 +417,6 @@ class MainWindow(QMainWindow):
         # Misc
         '.diff', '.patch', '.lock'
     }
-
 
     TEXT_FILENAMES = {
         'dockerfile', 'makefile', 'rakefile', 'gemfile', 'vagrantfile', 'procfile',
@@ -409,7 +462,6 @@ class MainWindow(QMainWindow):
         self.worker.path_changed.connect(self.on_path_changed)
         self.worker.file_content_ready.connect(self.on_file_content_ready)
         self.worker.task_finished.connect(self.on_task_finished)
-        # self.worker.file_progress.connect(...) # Connected dynamically in download_file_with_progress
 
         # --- Connect Main GUI Signals to Worker Slots ---
         self.start_connection.connect(self.worker.connect_ssh)
@@ -430,8 +482,12 @@ class MainWindow(QMainWindow):
         self.sftp_browser.setEnabled(False)
         self.terminal_input.setEnabled(False)
 
+        # --- Auto-Update Check ---
+        self.update_checker = UpdateChecker()
+        self.update_checker.update_available.connect(self.on_update_available)
+        self.update_checker.start()
+
         # Delay session manager slightly to let window init
-        # This uses QTimer which is now correctly imported
         QTimer.singleShot(100, self.check_session_manager)
 
     def check_session_manager(self):
@@ -521,8 +577,6 @@ class MainWindow(QMainWindow):
                 return True
         return False
 
-
-
     def format_size(self, size_in_bytes):
         if size_in_bytes == 0: return "0 B"
         units = ["B", "KB", "MB", "GB", "TB"]
@@ -603,7 +657,6 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_path_changed(self, new_path):
-        # self.terminal_output.append(f"Path changed to: {new_path}")
         self.populate_sftp_browser(new_path)
 
     @pyqtSlot(str, str)
@@ -677,8 +730,6 @@ class MainWindow(QMainWindow):
         self.start_run_command.emit(command, self.current_remote_path)
 
     def download_item(self, item):
-        # I fixed this so it won't crash if you try to use it.
-        # It now properly gets data from the item and asks where to save.
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data: return
 
@@ -688,7 +739,6 @@ class MainWindow(QMainWindow):
         else:
             remote_path = data["full_path"]
             filename = data["filename"]
-            # Ask user where to save
             local_dest, _ = QFileDialog.getSaveFileName(self, "Save File", os.path.join(self.local_path, filename))
             if local_dest:
                  self.download_file_with_progress(remote_path, local_dest)
@@ -698,13 +748,38 @@ class MainWindow(QMainWindow):
         """
         SLOT: Called if the UpdateChecker finds a newer version.
         """
-        QMessageBox.information(
+        reply = QMessageBox.question(
             self,
             "Update Available",
-            f"A new version ({new_version}) of MobaTuxTerm is available!\n\n"
-            "Please update IonOS or git pull the latest changes."
+            f"New version {new_version} available. Update now?\n(App will need a restart after)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        # TODO: later we can add a "Update Now" button that does the git pull for them
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.start_app_update()
+
+    def start_app_update(self):
+        """Starts the updater thread."""
+        self.update_progress_dialog = QProgressDialog("Updating MobaTuxTerm...", None, 0, 100, self)
+        self.update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.update_progress_dialog.setMinimumDuration(0)
+        # Disable cancel button for safety during generic update
+        self.update_progress_dialog.setCancelButton(None)
+
+        self.app_updater = AppUpdater()
+        self.app_updater.update_progress.connect(self.update_progress_dialog.setValue)
+        self.app_updater.update_finished.connect(self.on_update_finished)
+        self.app_updater.start()
+
+    @pyqtSlot(bool, str)
+    def on_update_finished(self, success, message):
+        self.update_progress_dialog.close()
+        if success:
+             QMessageBox.information(self, "Update Complete", message)
+             # Optional: Close app automatically?
+             # QApplication.quit()
+        else:
+             QMessageBox.critical(self, "Update Failed", message)
 
     def download_file_with_progress(self, remote_path, local_path):
         filename = os.path.basename(remote_path)
@@ -712,7 +787,6 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModality.WindowModal)
         progress.setMinimumDuration(0) # Show immediately
 
-        # Connect worker progress signal to dialog
         self.worker.file_progress.connect(
             lambda fn, pct: progress.setValue(pct) if fn == filename else None
         )
