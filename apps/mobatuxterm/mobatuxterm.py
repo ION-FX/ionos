@@ -3,13 +3,13 @@ import os
 import stat
 import paramiko
 import io
-import os
 import json
 import base64
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+import urllib.request
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -18,13 +18,13 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStyle, QMenu, QFileDialog, QProgressDialog,
     QListWidget, QListWidgetItem, QInputDialog
 )
-from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon, QFont
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal
+# Added QTimer to imports here
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer, QThread, pyqtSignal
 from mobatuxtermfiles.ssh_worker import SshWorker
 
 APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(APP_ROOT_DIR) # <--- ADD THIS LINE
+sys.path.append(APP_ROOT_DIR)
 
 class ConnectionDialog(QDialog):
     """
@@ -83,7 +83,6 @@ class RemoteTextEditorDialog(QDialog):
         self.setWindowTitle(f"Editing: {remote_path}")
         self.setMinimumSize(800, 600)
 
-        # --- THIS IS THE MISSING UI CODE ---
         layout = QVBoxLayout(self)
 
         self.text_edit = QTextEdit()
@@ -94,7 +93,6 @@ class RemoteTextEditorDialog(QDialog):
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         layout.addWidget(self.buttons)
-        # --- END OF MISSING UI CODE ---
 
         # Now that self.text_edit exists, we can set its text
         self.text_edit.setText(file_content)
@@ -110,8 +108,7 @@ class RemoteTextEditorDialog(QDialog):
         """
         content = self.text_edit.toPlainText()
         self.save_requested.emit(self.remote_path, content)
-        # We don't show success/error here. The MainWindow will.
-        self.accept() # Close the dialog
+        self.accept()
 
 class SessionManagerDialog(QDialog):
     """
@@ -305,13 +302,79 @@ class SessionManagerDialog(QDialog):
 
     def get_selected_session(self):
         return self.selected_session_details
+class UpdateChecker(QThread):
+    """
+    Checks a raw text file on GitHub for version number.
+    """
+    update_available = pyqtSignal(str) # Signal emits the new version number
+
+    VERSION_URL = "https://raw.githubusercontent.com/ION-FX/ionos/main/apps/mobatuxterm/mobatuxtermfiles/version.txt"
+    LOCAL_VERSION_FILE = os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "version.txt")
+
+    def run(self):
+        try:
+            # 1. Get remote version
+            # Timeout is important so it doesn't hang if GitHub is slow
+            with urllib.request.urlopen(self.VERSION_URL, timeout=5) as response:
+                remote_ver_str = response.read().decode('utf-8').strip()
+                remote_ver = int(remote_ver_str)
+
+            # 2. Get local version
+            if os.path.exists(self.LOCAL_VERSION_FILE):
+                with open(self.LOCAL_VERSION_FILE, 'r') as f:
+                    local_ver_str = f.read().strip()
+                    local_ver = int(local_ver_str)
+            else:
+                # If local file is missing, assume version 0 and force update
+                local_ver = 0
+
+            # 3. Compare
+            if remote_ver > local_ver:
+                self.update_available.emit(remote_ver_str)
+
+        except Exception as e:
+            # Fail silently in the background if no internet or bad URL
+            print(f"Update check failed: {e}")
+
+
 
 class MainWindow(QMainWindow):
     """
     The main application window.
     """
+    # --- EXTENSION DEFINITIONS ---
+    TEXT_EXTENSIONS = {
+        # Config & Data
+        '.yml', '.yaml', '.json', '.xml', '.ini', '.conf', '.config', '.cfg', '.toml',
+        '.properties', '.csv', '.tsv', '.log', '.sql', '.plist', '.nfo',
+        # Web
+        '.html', '.htm', '.xhtml', '.css', '.scss', '.sass', '.less', '.js', '.jsx',
+        '.ts', '.tsx', '.vue', '.php', '.asp', '.aspx', '.jsp',
+        # Scripting & Code
+        '.py', '.pyw', '.rb', '.pl', '.pm', '.sh', '.bash', '.zsh', '.fish', '.bat',
+        '.cmd', '.ps1', '.psm1', '.vbs', '.lua', '.go', '.rs', '.dart', '.elm', '.erl',
+        '.hs', '.lhs', '.ml', '.mli', '.jl', '.nim', '.cr', '.ex', '.exs',
+        # C-family
+        '.c', '.cpp', '.h', '.hpp', '.cc', '.hh', '.cxx', '.hxx', '.m', '.mm', '.cs',
+        '.java', '.kt', '.kts', '.scala', '.groovy', '.swift', '.valas',
+        # Documentation & Plain Text
+        '.txt', '.md', '.markdown', '.rst', '.tex', '.latex', '.asciidoc', '.adoc',
+        '.org', '.me', '.1', '.2', '.3', '.4', '.5', '.6', '.7', '.8',
+        # Misc
+        '.diff', '.patch', '.lock'
+    }
+
+
+    TEXT_FILENAMES = {
+        'dockerfile', 'makefile', 'rakefile', 'gemfile', 'vagrantfile', 'procfile',
+        'cmakelists.txt', 'license', 'readme', 'changelog', 'copying', 'install',
+        # Dotfiles are best matched as exact filenames
+        '.bashrc', '.zshrc', '.profile', '.bash_profile', '.gitconfig', '.vimrc',
+        '.nanorc', '.inputrc', '.xinitrc', '.xprofile', '.bash_aliases', '.gitignore',
+        '.gitattributes', '.editorconfig', '.env', '.htaccess'
+    }
+
     # Define signals to safely call worker slots from the main thread
-    # This is the cleanest, most thread-safe way.
     start_connection = pyqtSignal(dict)
     start_list_directory = pyqtSignal(str)
     start_run_command = pyqtSignal(str, str)
@@ -327,9 +390,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("MobaTuxTerm - for IonOS")
         self.setGeometry(100, 100, 1200, 800)
 
-        # Remove these! The worker will manage them.
-        # self.ssh_client = None
-        # self.sftp_client = None
         self.current_remote_path = ""
         self.local_path = os.path.expanduser("~")
 
@@ -349,14 +409,13 @@ class MainWindow(QMainWindow):
         self.worker.path_changed.connect(self.on_path_changed)
         self.worker.file_content_ready.connect(self.on_file_content_ready)
         self.worker.task_finished.connect(self.on_task_finished)
+        # self.worker.file_progress.connect(...) # Connected dynamically in download_file_with_progress
 
         # --- Connect Main GUI Signals to Worker Slots ---
-        # This ensures the worker's slots are called on the worker's thread
         self.start_connection.connect(self.worker.connect_ssh)
         self.start_list_directory.connect(self.worker.list_directory)
         self.start_run_command.connect(self.worker.run_command)
         self.start_download_file.connect(self.worker.download_file)
-        # ... add connects for upload, delete, mkdir, etc. ...
         self.start_get_file_content.connect(self.worker.get_file_content)
         self.start_save_file_content.connect(self.worker.save_file_content)
         self.start_cancel_task.connect(self.worker.cancel_task)
@@ -371,13 +430,17 @@ class MainWindow(QMainWindow):
         self.sftp_browser.setEnabled(False)
         self.terminal_input.setEnabled(False)
 
-        # Show session manager *after* __init__ is done
+        # Delay session manager slightly to let window init
+        # This uses QTimer which is now correctly imported
+        QTimer.singleShot(100, self.check_session_manager)
+
+    def check_session_manager(self):
         if not self.show_session_manager():
             sys.exit(0)
+
     def init_ui(self):
         """
         Initializes the main User Interface components.
-        This can safely run before a connection is established.
         """
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -393,23 +456,22 @@ class MainWindow(QMainWindow):
         sftp_layout.setContentsMargins(0, 0, 0, 0) # No padding
         sftp_layout.setSpacing(2) # A little space between path bar and tree
 
-        # 1. The new Path Bar
+        # 1. Path Bar
         self.sftp_path_bar = QLineEdit()
         self.sftp_path_bar.setFont(QFont("Monospace", 9))
-        self.sftp_path_bar.returnPressed.connect(self.navigate_sftp_path) # <-- ADD this line
+        self.sftp_path_bar.returnPressed.connect(self.navigate_sftp_path)
         self.sftp_path_bar.setPlaceholderText("Current Path...")
         sftp_layout.addWidget(self.sftp_path_bar)
 
-        # 2. The existing SFTP Browser
+        # 2. SFTP Browser
         self.sftp_browser = QTreeWidget()
         self.sftp_browser.setHeaderLabels(["Name", "Size", "Type", "Permissions"])
         self.sftp_browser.setColumnWidth(0, 300)
         self.sftp_browser.itemDoubleClicked.connect(self.sftp_item_double_clicked)
         self.sftp_browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        # self.sftp_browser.customContextMenuRequested.connect(self.sftp_context_menu) # You'll need to re-link this
+        # self.sftp_browser.customContextMenuRequested.connect(self.sftp_context_menu)
         sftp_layout.addWidget(self.sftp_browser)
 
-        # 3. Add the *container* to the splitter
         splitter.addWidget(sftp_container)
 
         # --- Right Side: Terminal ---
@@ -420,11 +482,11 @@ class MainWindow(QMainWindow):
         self.terminal_output = QTextEdit()
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setFont(QFont("Monospace", 10))
-        self.terminal_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4;")
+        self.terminal_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; border: none;")
 
         self.terminal_input = QLineEdit()
         self.terminal_input.setFont(QFont("Monospace", 10))
-        self.terminal_input.setStyleSheet("background-color: #252526; color: #d4d4d4; border: 1px solid #333;")
+        self.terminal_input.setStyleSheet("background-color: #252526; color: #d4d4d4; border-top: 1px solid #333;")
         self.terminal_input.returnPressed.connect(self.execute_command)
 
         terminal_layout.addWidget(self.terminal_output)
@@ -433,111 +495,75 @@ class MainWindow(QMainWindow):
 
         splitter.setSizes([400, 800]) # Initial size ratio
 
-    def navigate_sftp_path(self):
-        """
-        Called when the user presses Enter in the SFTP path bar.
-        """
-        new_path = self.sftp_path_bar.text().strip()
-        if not new_path:
-            # If it's empty, do nothing
-            return
+    # --- HELPER: Check if file is text ---
+    def is_text_file(self, filename):
+        """Determines if a file is likely safely editable text."""
+        base = os.path.basename(filename)
+        name, ext = os.path.splitext(base)
+        # Check if the WHOLE filename is in our allowed list (covers Dockerfile AND .bashrc)
+        if base.lower() in self.TEXT_FILENAMES: return True
+        # Check if it has an allowed extension (covers test.py)
+        if ext.lower() in self.TEXT_EXTENSIONS: return True
+        return False
 
-        # We can just call populate_sftp_browser!
-        # It already disables the GUI, emits the signal to the worker,
-        # and handles the results.
+    def navigate_sftp_path(self):
+        new_path = self.sftp_path_bar.text().strip()
+        if not new_path: return
         self.populate_sftp_browser(new_path)
 
     def show_session_manager(self):
-        """
-        Shows the session manager. If a session is chosen,
-        it *signals* the worker to connect.
-        """
         dialog = SessionManagerDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             session = dialog.get_selected_session()
             if session:
-                # --- THIS IS THE KEY CHANGE ---
-                # We don't call connect_ssh directly. We emit a signal.
                 self.terminal_output.append(f"Connecting to {session['host']}...")
                 self.start_connection.emit(session)
                 return True
         return False
 
+
+
     def format_size(self, size_in_bytes):
-        """Converts bytes to a human-readable string (KB, MB, GB)."""
-        if size_in_bytes == 0:
-            return "0 B"
+        if size_in_bytes == 0: return "0 B"
         units = ["B", "KB", "MB", "GB", "TB"]
         i = 0
         size = float(size_in_bytes)
         while size >= 1024 and i < len(units) - 1:
             size /= 1024
             i += 1
-        # Format to one decimal place, e.g., "1.2 MB"
         return f"{size:.1f} {units[i]}"
 
     def update_terminal_prompt(self):
-        """
-        Updates the terminal prompt display.
-        (This is just visual, the real path is tracked internally)
-        """
         prompt = f"[{self.current_remote_path}]$ "
         self.terminal_input.setPlaceholderText(prompt)
-        # Ensure the cursor in the output window is at the end
         self.terminal_output.moveCursor(self.terminal_output.textCursor().MoveOperation.End)
-    # REMOVE connect_ssh() - The worker does this now.
-
-    # ... init_ui() is unchanged ...
-
-    # REMOVE post_connection_setup() - This logic moves to on_connection_ready()
-
-    # --- New GUI Slots to Receive Worker Signals ---
 
     @pyqtSlot(str, str)
     def on_connection_ready(self, user_host, initial_path):
-        """
-        SLOT: Called by worker when connection is established.
-        This is the *new* 'post_connection_setup'.
-        """
         self.current_remote_path = initial_path
         self.setWindowTitle(f"MobaTuxTerm - {user_host}")
         self.sftp_path_bar.setText(self.current_remote_path)
-
-        # Enable UI
         self.sftp_browser.setEnabled(True)
         self.terminal_input.setEnabled(True)
-
-        # Request initial directory listing
         self.populate_sftp_browser(self.current_remote_path)
-
         self.update_terminal_prompt()
         self.terminal_input.setFocus()
-
-        # Run welcome command
         self.execute_command(command_str="echo 'Welcome to MobaTuxTerm!' && uname -a", internal=True)
 
     @pyqtSlot(str, str)
     def on_error(self, title, message):
-        """
-        SLOT: Called by worker when any error occurs.
-        """
-        QMessageBox.critical(self, title, message)
-        self.terminal_output.append(f"<font color='red'>ERROR: {message}</font>")
-        # Re-enable UI if it was locked
+        if "Connection" in title:
+             QMessageBox.critical(self, title, message)
+        self.terminal_output.append(f"<font color='#ff5555'>ERROR: {message}</font>")
         self.sftp_browser.setEnabled(True)
         self.terminal_input.setEnabled(True)
 
     @pyqtSlot(list, str)
     def on_listing_ready(self, items, new_path):
-        """
-        SLOT: Called by worker when directory listing is ready.
-        This contains the GUI logic from your old 'populate_sftp_browser'.
-        """
         self.current_remote_path = new_path
         self.sftp_path_bar.setText(self.current_remote_path)
         self.sftp_browser.clear()
 
-        # Add ".." item to go up
         up_item = QTreeWidgetItem(["..", "", "Parent Directory", ""])
         up_item.setIcon(0, self.folder_icon)
         up_item.setData(0, Qt.ItemDataRole.UserRole, {"is_dir": True, "filename": ".."})
@@ -547,203 +573,157 @@ class MainWindow(QMainWindow):
 
         for item in items:
             filename = item.filename
-            if filename in ('.', '..'):
-                continue
-
+            if filename in ('.', '..'): continue
             is_dir = stat.S_ISDIR(item.st_mode)
-            file_type = "Directory" if is_dir else "File"
+            # Updated to use is_text_file for better Type column info
+            file_type = "Directory" if is_dir else ("Text File" if self.is_text_file(filename) else "File")
             size = self.format_size(item.st_size) if not is_dir else ""
             permissions = stat.filemode(item.st_mode)
 
             tree_item = QTreeWidgetItem([filename, size, file_type, permissions])
             tree_item.setIcon(0, self.folder_icon if is_dir else self.file_icon)
 
-            item_data = {
+            tree_item.setData(0, Qt.ItemDataRole.UserRole, {
                 "is_dir": is_dir,
                 "filename": filename,
-                "full_path": os.path.join(self.current_remote_path, filename) # Use os.path.join
-            }
-            tree_item.setData(0, Qt.ItemDataRole.UserRole, item_data)
+                "full_path": os.path.join(self.current_remote_path, filename)
+            })
             self.sftp_browser.addTopLevelItem(tree_item)
 
         self.update_terminal_prompt()
-        self.sftp_browser.setEnabled(True) # Re-enable after load
+        self.sftp_browser.setEnabled(True)
 
     @pyqtSlot(str, str)
     def on_command_output(self, stdout, stderr):
-        """
-        SLOT: Called by worker when a command finishes.
-        """
-        if stdout:
-            self.terminal_output.append(stdout)
-        if stderr:
-            self.terminal_output.append(f"<font color='orange'>STDERR: {stderr}</font>")
+        if stdout: self.terminal_output.append(stdout)
+        if stderr: self.terminal_output.append(f"<font color='#ffaa00'>{stderr}</font>")
         self.update_terminal_prompt()
         self.terminal_input.setEnabled(True)
+        self.terminal_input.setFocus()
 
     @pyqtSlot(str)
     def on_path_changed(self, new_path):
-        """
-        SLOT: Called by worker after a successful 'cd' command.
-        """
-        self.terminal_output.append(f"Path changed to: {new_path}")
-        self.populate_sftp_browser(new_path) # This will trigger a new listing
+        # self.terminal_output.append(f"Path changed to: {new_path}")
+        self.populate_sftp_browser(new_path)
 
     @pyqtSlot(str, str)
     def on_task_finished(self, title, message):
-        """
-        SLOT: Called by worker for simple success notifications.
-        """
         QMessageBox.information(self, title, message)
-        # Refresh browser after any task that might change files
         self.populate_sftp_browser(self.current_remote_path)
 
-    # --- Now, modify your action methods to *emit signals* ---
-
     def populate_sftp_browser(self, path):
-        """
-        This method NO LONGER does the work.
-        It just disables the GUI and asks the worker to do the work.
-        """
-        self.sftp_browser.setEnabled(False) # Disable during load
-        self.terminal_output.append(f"Listing {path}...")
+        self.sftp_browser.setEnabled(False)
         self.start_list_directory.emit(path)
 
     def sftp_item_double_clicked(self, item, column):
-        """
-        This method NO LONGER does the work.
-        It just asks the worker to do the work.
-        """
-        item_data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not item_data:
-            return
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data: return
 
-        if item_data["is_dir"]:
-            filename = item_data["filename"]
-            # Use os.path.join for robust path handling
-            new_path = os.path.normpath(os.path.join(self.current_remote_path, filename))
-            self.populate_sftp_browser(new_path) # Ask worker to list new path
+        if data["is_dir"]:
+            new_path = os.path.normpath(os.path.join(self.current_remote_path, data["filename"]))
+            self.populate_sftp_browser(new_path)
         else:
-            # Ask worker to get file content
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.start_get_file_content.emit(item_data["full_path"])
+            # Updated double-click logic with text file check
+            if self.is_text_file(data["filename"]):
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                self.start_get_file_content.emit(data["full_path"])
+            else:
+                 QMessageBox.information(self, "Binary File",
+                    f"{data['filename']} does not appear to be a text file.\nDouble-click downloading not yet implemented for binaries.")
 
     @pyqtSlot(str, str)
     def on_file_content_ready(self, remote_path, content_str):
-        """
-        SLOT: Called by worker when file content is ready for editing.
-        """
-        QApplication.restoreOverrideCursor() # Restore cursor
-
-        # Pass the remote_path and content to the editor
-        # The editor can now be dumber. It just needs to emit a signal on save.
+        QApplication.restoreOverrideCursor()
         editor = RemoteTextEditorDialog(remote_path, content_str, self)
-
-        # Connect the editor's save signal to our signal
         editor.save_requested.connect(self.start_save_file_content)
-
         if editor.exec() == QDialog.DialogCode.Accepted:
-            # Refresh the SFTP browser to show new size/date
             self.populate_sftp_browser(self.current_remote_path)
 
     def execute_command(self, command_str=None, internal=False):
-        """
-        Executes a command on the remote server via SSH.
-        This now intercepts 'nano' and other editors.
-        """
-        if command_str is None:
-            command = self.terminal_input.text().strip()
-        else:
-            command = command_str
-
-        if not command:
-            return
+        command = command_str if command_str is not None else self.terminal_input.text().strip()
+        if not command: return
 
         if not internal:
-            self.terminal_output.append(f"[{self.current_remote_path}]$ {command}")
+            self.terminal_output.append(f"<font color='#5a90d6'>[{self.current_remote_path}]$ {command}</font>")
             self.terminal_input.clear()
 
-        # --- NEW: Interception Logic ---
-        blocked_editors = ["nano", "vim", "vi", "emacs"]
-        command_parts = command.split()
+        blocked_editors = {"nano", "vim", "vi", "emacs"}
+        parts = command.split()
 
-        if command_parts and command_parts[0] in blocked_editors:
-            # This is a terminal editor command, let's intercept it.
-            if len(command_parts) < 2:
-                self.terminal_output.append(f"<font color='orange'>Usage: {command_parts[0]} &lt;filename&gt;</font>")
-                self.update_terminal_prompt()
-                return
+        if not internal and parts and parts[0] in blocked_editors:
+            if len(parts) < 2:
+                 self.terminal_output.append(f"<font color='orange'>Usage: {parts[0]} &lt;filename&gt;</font>")
+                 self.update_terminal_prompt()
+                 return
 
-            filename = command_parts[1]
-            # Resolve the full path
-            full_path = os.path.normpath(os.path.join(self.current_remote_path, filename))
+            target_file = None
+            for part in parts[1:]:
+                 if not part.startswith('-'):
+                      target_file = part
+                      break
 
-            self.terminal_output.append(f"Opening {filename} in GUI editor...")
+            if target_file:
+                 # Updated interception logic with text file check
+                 if self.is_text_file(target_file):
+                      full_path = os.path.normpath(os.path.join(self.current_remote_path, target_file))
+                      self.terminal_output.append(f"Opening {target_file} in internal editor...")
+                      QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                      self.start_get_file_content.emit(full_path)
+                      return
+                 else:
+                      self.terminal_output.append(f"<font color='orange'>Warning: {target_file} is not in approved text extensions list. Running normally in terminal.</font>")
 
-            # Use the *exact same logic* as sftp_item_double_clicked
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            self.start_get_file_content.emit(full_path)
+        self.terminal_input.setEnabled(False)
+        self.start_run_command.emit(command, self.current_remote_path)
 
-            # Note: We don't disable terminal_input here, because
-            # on_file_content_ready will show a dialog which is modal.
-
-        else:
-            # --- This is the ORIGINAL logic for all other commands ---
-            # It's not an editor, so run it normally.
-            self.terminal_input.setEnabled(False) # Disable until command finishes
-            self.start_run_command.emit(command, self.current_remote_path)
-
-        # We move this here, as the 'editor' path doesn't update it.
-        if not internal and not (command_parts and command_parts[0] in blocked_editors):
-             pass # Already handled by on_command_output
-        elif internal:
-             pass # Handled by on_command_output
-        else:
-            self.update_terminal_prompt()
     def download_item(self, item):
-        # ... (Get local_dest as you did before) ...
-        if is_dir:
-            # Recursive dir download is more complex,
-            # let's focus on a single file first.
-            QMessageBox.warning(self, "Not Implemented", "Recursive dir download is a big task! Let's do files first.")
-            return
+        # I fixed this so it won't crash if you try to use it.
+        # It now properly gets data from the item and asks where to save.
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data: return
+
+        if data["is_dir"]:
+             QMessageBox.warning(self, "Not Implemented", "Recursive dir download is a big task! Let's do files first.")
+             return
         else:
-            # This is a file download
-            self.download_file_with_progress(remote_path, local_dest)
+            remote_path = data["full_path"]
+            filename = data["filename"]
+            # Ask user where to save
+            local_dest, _ = QFileDialog.getSaveFileName(self, "Save File", os.path.join(self.local_path, filename))
+            if local_dest:
+                 self.download_file_with_progress(remote_path, local_dest)
+
+    @pyqtSlot(str)
+    def on_update_available(self, new_version):
+        """
+        SLOT: Called if the UpdateChecker finds a newer version.
+        """
+        QMessageBox.information(
+            self,
+            "Update Available",
+            f"A new version ({new_version}) of MobaTuxTerm is available!\n\n"
+            "Please update IonOS or git pull the latest changes."
+        )
+        # TODO: later we can add a "Update Now" button that does the git pull for them
 
     def download_file_with_progress(self, remote_path, local_path):
-        """
-        Creates a progress dialog and asks the worker to start downloading.
-        """
         filename = os.path.basename(remote_path)
         progress = QProgressDialog(f"Downloading {filename}...", "Cancel", 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0) # Show immediately
 
         # Connect worker progress signal to dialog
         self.worker.file_progress.connect(
             lambda fn, pct: progress.setValue(pct) if fn == filename else None
         )
 
-        # Connect worker finished signal to close dialog
-        # (Need a more robust way to tie this specific task to this dialog)
-        # For now, let's just have the progress hit 100.
-
-        # Connect the dialog's cancel button to the worker's cancel slot
         progress.canceled.connect(self.start_cancel_task)
-
-        # Ask worker to start
         self.start_download_file.emit(remote_path, local_path)
 
-    # ... (repeat this pattern for upload_files, delete_item, etc.) ...
-
     def closeEvent(self, event):
-        """
-        Handles the window close event to safely close connections
-        by asking the worker thread to do it and then quitting the thread.
-        """
-        self.start_close_connection.emit() # Tell worker to close connections
-        self.thread.quit() # Tell the thread's event loop to stop
-        self.thread.wait() # Wait for thread to finish cleanly
+        self.start_close_connection.emit()
+        self.thread.quit()
+        self.thread.wait(2000)
         event.accept()
 
 IONOS_DARK_THEME = """
@@ -844,4 +824,3 @@ if __name__ == "__main__":
     window = MainWindow() # This now handles the session dialog
     window.show()         # Always show the window
     sys.exit(app.exec())   # Start the application event loop
-
