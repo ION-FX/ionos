@@ -102,6 +102,6 @@ MainScript=Main.qml
 ConfigFile=theme.conf
 TranslationsDirectory=translations
 Email=plasma-devel@kde.org
-Theme-Id=breeze
+Theme-Id=IonOS_sddm
 Theme-API=2.0
 QtVersion=6
