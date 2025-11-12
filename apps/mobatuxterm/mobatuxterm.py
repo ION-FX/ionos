@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QInputDialog
 )
 from PyQt6.QtGui import QIcon, QFont
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer, QStandardPaths
 from mobatuxtermfiles.ssh_worker import SshWorker
 
 APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,14 +114,17 @@ class SessionManagerDialog(QDialog):
     Manages loading, creating, and deleting sessions.
     Also handles the master password.
     """
-    # Define the directory
-    CONFIG_DIR = "mobatuxtermfiles"
-    SESSIONS_FILE = os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "mobatuxterm_sessions.json")
 
     def __init__(self, parent=None):
-        # Get the full, absolute path to the directory for the session file
-        session_dir = os.path.dirname(self.SESSIONS_FILE)
-        os.makedirs(session_dir, exist_ok=True)
+        # --- NEW: Get user-writable config path ---
+        config_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.ConfigLocation)
+        app_config_dir = os.path.join(config_dir, "MobaTuxTerm")
+        os.makedirs(app_config_dir, exist_ok=True)
+        
+        # Save the new path as an instance variable
+        self.SESSIONS_FILE = os.path.join(app_config_dir, "mobatuxterm_sessions.json")
+        # --- END NEW ---
+
         super().__init__(parent)
         self.setWindowTitle("MobaTuxTerm Session Manager")
         self.setMinimumWidth(400)
