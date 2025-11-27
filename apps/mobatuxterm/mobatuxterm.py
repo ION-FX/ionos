@@ -5,6 +5,7 @@ import paramiko
 import io
 import json
 import base64
+import re
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -19,17 +20,14 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QInputDialog
 )
 from PyQt6.QtGui import QIcon, QFont
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer, QStandardPaths
+# ADDED QEvent here to fix the crash
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSlot, pyqtSignal, QTimer, QStandardPaths, QEvent
 from mobatuxtermfiles.ssh_worker import SshWorker
 
 APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(APP_ROOT_DIR)
 
 class ConnectionDialog(QDialog):
-    """
-    A dialog box to get SSH connection details from the user.
-    Now includes a session name.
-    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("New Connection Details")
@@ -58,7 +56,6 @@ class ConnectionDialog(QDialog):
         self.layout.addWidget(self.buttons)
 
     def get_details(self):
-        """Returns the connection details as a dictionary."""
         return {
             "name": self.name_input.text(),
             "host": self.host_input.text(),
@@ -68,12 +65,7 @@ class ConnectionDialog(QDialog):
         }
 
 class RemoteTextEditorDialog(QDialog):
-    """
-    A dialog to edit a remote text file.
-    It no longer knows about SFTP. It just emits a signal on save.
-    """
-    # Signal to emit when user clicks "Save"
-    save_requested = pyqtSignal(str, str) # remote_path, new_content
+    save_requested = pyqtSignal(str, str)
 
     def __init__(self, remote_path, file_content, parent=None):
         super().__init__(parent)
@@ -93,37 +85,22 @@ class RemoteTextEditorDialog(QDialog):
         )
         layout.addWidget(self.buttons)
 
-        # Now that self.text_edit exists, we can set its text
         self.text_edit.setText(file_content)
-
-        # Now that self.buttons exists, we can connect its signals
         self.buttons.accepted.connect(self.request_save)
         self.buttons.rejected.connect(self.reject)
 
     def request_save(self):
-        """
-        Emits the new content and accepts the dialog.
-        The MainWindow will handle the actual saving.
-        """
         content = self.text_edit.toPlainText()
         self.save_requested.emit(self.remote_path, content)
         self.accept()
 
 class SessionManagerDialog(QDialog):
-    """
-    Manages loading, creating, and deleting sessions.
-    Also handles the master password.
-    """
-
     def __init__(self, parent=None):
-        # --- NEW: Get user-writable config path ---
         config_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.ConfigLocation)
         app_config_dir = os.path.join(config_dir, "MobaTuxTerm")
         os.makedirs(app_config_dir, exist_ok=True)
-        
-        # Save the new path as an instance variable
+
         self.SESSIONS_FILE = os.path.join(app_config_dir, "mobatuxterm_sessions.json")
-        # --- END NEW ---
 
         super().__init__(parent)
         self.setWindowTitle("MobaTuxTerm Session Manager")
@@ -136,7 +113,6 @@ class SessionManagerDialog(QDialog):
 
         self.layout = QVBoxLayout(self)
 
-        # Master Password
         self.pass_layout = QFormLayout()
         self.master_pass_input = QLineEdit()
         self.master_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -147,12 +123,10 @@ class SessionManagerDialog(QDialog):
         self.unlock_button.clicked.connect(self.unlock_sessions)
         self.layout.addWidget(self.unlock_button)
 
-        # Session List (initially hidden)
         self.session_list_widget = QListWidget()
         self.session_list_widget.itemDoubleClicked.connect(self.connect_session)
         self.layout.addWidget(self.session_list_widget)
 
-        # Buttons (initially hidden)
         self.button_layout = QHBoxLayout()
         self.connect_button = QPushButton("Connect")
         self.connect_button.clicked.connect(self.connect_session)
@@ -166,14 +140,12 @@ class SessionManagerDialog(QDialog):
         self.button_layout.addWidget(self.delete_button)
         self.layout.addLayout(self.button_layout)
 
-        # Hide session UI until unlocked
         self.session_list_widget.hide()
         self.connect_button.hide()
         self.new_button.hide()
         self.delete_button.hide()
 
     def get_key_from_password(self, password, salt):
-        """Derives a 32-byte key from password and salt."""
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),
             length=32,
@@ -184,7 +156,6 @@ class SessionManagerDialog(QDialog):
         return kdf.derive(password.encode())
 
     def unlock_sessions(self):
-        """Attempts to load and decrypt sessions with the given master password."""
         password = self.master_pass_input.text()
         if not password:
             QMessageBox.warning(self, "Password", "Please enter a master password.")
@@ -192,7 +163,6 @@ class SessionManagerDialog(QDialog):
 
         try:
             if os.path.exists(self.SESSIONS_FILE):
-                # File exists, try to decrypt
                 with open(self.SESSIONS_FILE, 'r') as f:
                     data = json.load(f)
                 self.salt = base64.urlsafe_b64decode(data['salt'])
@@ -206,14 +176,12 @@ class SessionManagerDialog(QDialog):
                     self.sessions.append(s_decrypted)
 
             else:
-                # First time run: create new salt and use this password
                 self.salt = os.urandom(16)
                 self.master_key = self.get_key_from_password(password, self.salt)
                 self.sessions = []
-                self.save_sessions() # Save the empty file with salt
+                self.save_sessions()
                 QMessageBox.information(self, "Welcome", "Master password set. You can now create new sessions.")
 
-            # Success! Show session UI
             self.master_pass_input.setDisabled(True)
             self.unlock_button.setDisabled(True)
 
@@ -225,7 +193,7 @@ class SessionManagerDialog(QDialog):
             self.populate_session_list()
 
         except Exception as e:
-            self.master_key = None # Reset key on failure
+            self.master_key = None
             QMessageBox.critical(self, "Unlock Failed", f"Incorrect password or corrupted session file.\n{e}")
 
     def populate_session_list(self):
@@ -236,7 +204,6 @@ class SessionManagerDialog(QDialog):
             self.session_list_widget.addItem(item)
 
     def save_sessions(self):
-        """Encrypts and saves all current sessions to file."""
         if not self.master_key or not self.salt:
             QMessageBox.critical(self, "Error", "Cannot save sessions without a master key.")
             return
@@ -246,7 +213,7 @@ class SessionManagerDialog(QDialog):
         for s in self.sessions:
             encrypted_s = s.copy()
             encrypted_s['encrypted_password'] = fernet.encrypt(s['password'].encode()).decode()
-            del encrypted_s['password'] # Don't save plaintext password
+            del encrypted_s['password']
             encrypted_sessions.append(encrypted_s)
 
         data = {
@@ -261,7 +228,6 @@ class SessionManagerDialog(QDialog):
             QMessageBox.critical(self, "Save Error", f"Could not write session file:\n{e}")
 
     def connect_session(self):
-        """Sets the selected session and accepts the dialog."""
         selected_item = self.session_list_widget.currentItem()
         if not selected_item:
             return
@@ -270,11 +236,9 @@ class SessionManagerDialog(QDialog):
         self.accept()
 
     def new_session(self):
-        """Shows the ConnectionDialog to create a new session."""
         conn_dialog = ConnectionDialog(self)
         if conn_dialog.exec() == QDialog.DialogCode.Accepted:
             new_session_details = conn_dialog.get_details()
-            # Check for duplicate names
             if any(s['name'] == new_session_details['name'] for s in self.sessions):
                 QMessageBox.warning(self, "Duplicate Name", "A session with this name already exists.")
                 return
@@ -284,7 +248,6 @@ class SessionManagerDialog(QDialog):
             self.populate_session_list()
 
     def delete_session(self):
-        """Deletes the selected session."""
         selected_item = self.session_list_widget.currentItem()
         if not selected_item:
             return
@@ -306,31 +269,24 @@ class SessionManagerDialog(QDialog):
         return self.selected_session_details
 
 class UpdateChecker(QThread):
-    """
-    Checks a raw text file on GitHub for version number.
-    """
-    update_available = pyqtSignal(str) # Signal emits the new version number
+    update_available = pyqtSignal(str)
 
     VERSION_URL = "https://raw.githubusercontent.com/ION-FX/ionos/main/apps/mobatuxterm/mobatuxtermfiles/version.txt"
     LOCAL_VERSION_FILE = os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "version.txt")
 
     def run(self):
         try:
-            # 1. Get remote version
             with urllib.request.urlopen(self.VERSION_URL, timeout=5) as response:
                 remote_ver_str = response.read().decode('utf-8').strip()
                 remote_ver = int(remote_ver_str)
 
-            # 2. Get local version
             if os.path.exists(self.LOCAL_VERSION_FILE):
                 with open(self.LOCAL_VERSION_FILE, 'r') as f:
                     local_ver_str = f.read().strip()
                     local_ver = int(local_ver_str)
             else:
-                # If local file is missing, assume version 0
                 local_ver = 0
 
-            # 3. Compare
             if remote_ver > local_ver:
                 self.update_available.emit(remote_ver_str)
 
@@ -338,14 +294,10 @@ class UpdateChecker(QThread):
             print(f"Update check failed: {e}")
 
 class AppUpdater(QThread):
-    """
-    Downloads new versions of specific files from GitHub and replaces the local ones.
-    """
-    update_finished = pyqtSignal(bool, str) # success, message
+    update_finished = pyqtSignal(bool, str)
     update_progress = pyqtSignal(int)
 
     BASE_URL = "https://raw.githubusercontent.com/ION-FX/ionos/main/apps/mobatuxterm/"
-    # List of files to update relative to APP_ROOT_DIR
     FILES_TO_UPDATE = [
         "mobatuxterm.py",
         "mobatuxtermfiles/ssh_worker.py",
@@ -355,39 +307,31 @@ class AppUpdater(QThread):
     def run(self):
         try:
             total_files = len(self.FILES_TO_UPDATE)
-            # 1. Download all to .tmp first (safe approach)
             for i, rel_path in enumerate(self.FILES_TO_UPDATE):
                 url = self.BASE_URL + rel_path
                 local_path = os.path.join(APP_ROOT_DIR, rel_path)
                 tmp_path = local_path + ".tmp"
 
-                # Ensure directory exists (important if we add new subfolders later)
                 os.makedirs(os.path.dirname(local_path), exist_ok=True)
 
-                # Download
                 with urllib.request.urlopen(url, timeout=10) as response, open(tmp_path, 'wb') as out_file:
                     out_file.write(response.read())
-                
-                # Calculate roughly 50% progress for downloading
+
                 progress = int(((i + 1) / total_files) * 50)
                 self.update_progress.emit(progress)
 
-            # 2. If we got here, all downloads succeeded. Perform the swap.
             for i, rel_path in enumerate(self.FILES_TO_UPDATE):
                 local_path = os.path.join(APP_ROOT_DIR, rel_path)
                 tmp_path = local_path + ".tmp"
-                
-                # On Linux, os.rename is atomic and can overwrite running files safely
+
                 os.rename(tmp_path, local_path)
 
-                # Calculate remaining 50% progress for installing
                 progress = 50 + int(((i + 1) / total_files) * 50)
                 self.update_progress.emit(progress)
 
             self.update_finished.emit(True, "Update successfully installed!\nPlease restart MobaTuxTerm.")
 
         except Exception as e:
-            # Clean up any .tmp files if it failed
             for rel_path in self.FILES_TO_UPDATE:
                  tmp_path = os.path.join(APP_ROOT_DIR, rel_path) + ".tmp"
                  if os.path.exists(tmp_path):
@@ -396,41 +340,29 @@ class AppUpdater(QThread):
             self.update_finished.emit(False, f"Update failed:\n{e}")
 
 class MainWindow(QMainWindow):
-    """
-    The main application window.
-    """
-    # --- EXTENSION DEFINITIONS ---
     TEXT_EXTENSIONS = {
-        # Config & Data
         '.yml', '.yaml', '.json', '.xml', '.ini', '.conf', '.config', '.cfg', '.toml',
         '.properties', '.csv', '.tsv', '.log', '.sql', '.plist', '.nfo',
-        # Web
         '.html', '.htm', '.xhtml', '.css', '.scss', '.sass', '.less', '.js', '.jsx',
         '.ts', '.tsx', '.vue', '.php', '.asp', '.aspx', '.jsp',
-        # Scripting & Code
         '.py', '.pyw', '.rb', '.pl', '.pm', '.sh', '.bash', '.zsh', '.fish', '.bat',
         '.cmd', '.ps1', '.psm1', '.vbs', '.lua', '.go', '.rs', '.dart', '.elm', '.erl',
         '.hs', '.lhs', '.ml', '.mli', '.jl', '.nim', '.cr', '.ex', '.exs',
-        # C-family
         '.c', '.cpp', '.h', '.hpp', '.cc', '.hh', '.cxx', '.hxx', '.m', '.mm', '.cs',
         '.java', '.kt', '.kts', '.scala', '.groovy', '.swift', '.valas',
-        # Documentation & Plain Text
         '.txt', '.md', '.markdown', '.rst', '.tex', '.latex', '.asciidoc', '.adoc',
         '.org', '.me', '.1', '.2', '.3', '.4', '.5', '.6', '.7', '.8',
-        # Misc
         '.diff', '.patch', '.lock'
     }
 
     TEXT_FILENAMES = {
         'dockerfile', 'makefile', 'rakefile', 'gemfile', 'vagrantfile', 'procfile',
         'cmakelists.txt', 'license', 'readme', 'changelog', 'copying', 'install',
-        # Dotfiles are best matched as exact filenames
         '.bashrc', '.zshrc', '.profile', '.bash_profile', '.gitconfig', '.vimrc',
         '.nanorc', '.inputrc', '.xinitrc', '.xprofile', '.bash_aliases', '.gitignore',
         '.gitattributes', '.editorconfig', '.env', '.htaccess'
     }
 
-    # Define signals to safely call worker slots from the main thread
     start_connection = pyqtSignal(dict)
     start_list_directory = pyqtSignal(str)
     start_run_command = pyqtSignal(str, str)
@@ -440,6 +372,9 @@ class MainWindow(QMainWindow):
     start_save_file_content = pyqtSignal(str, str)
     start_cancel_task = pyqtSignal()
     start_close_connection = pyqtSignal()
+
+    # --- ADDED THIS TO FIX CRASH ---
+    start_send_raw = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -461,7 +396,7 @@ class MainWindow(QMainWindow):
         self.worker.error.connect(self.on_error)
         self.worker.connection_ready.connect(self.on_connection_ready)
         self.worker.listing_ready.connect(self.on_listing_ready)
-        self.worker.command_output.connect(self.on_command_output)
+        self.worker.shell_data_received.connect(self.on_shell_data)
         self.worker.path_changed.connect(self.on_path_changed)
         self.worker.file_content_ready.connect(self.on_file_content_ready)
         self.worker.task_finished.connect(self.on_task_finished)
@@ -475,6 +410,9 @@ class MainWindow(QMainWindow):
         self.start_save_file_content.connect(self.worker.save_file_content)
         self.start_cancel_task.connect(self.worker.cancel_task)
         self.start_close_connection.connect(self.worker.close_connection)
+
+        # --- ADDED THIS TO FIX CRASH ---
+        self.start_send_raw.connect(self.worker.send_raw)
 
         # --- Start the thread ---
         self.thread.start()
@@ -497,6 +435,17 @@ class MainWindow(QMainWindow):
         if not self.show_session_manager():
             sys.exit(0)
 
+    def eventFilter(self, obj, event):
+        # Check if the event is on the input bar and is a KeyPress
+        if obj == self.terminal_input and event.type() == QEvent.Type.KeyPress:
+            # Check for Ctrl + C
+            if event.key() == Qt.Key.Key_C and (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+                # Send ASCII \x03 (ETX) which is the SIGINT signal
+                self.start_send_raw.emit('\x03')
+                return True # Consume the event so it doesn't try to "Copy" text
+
+        return super().eventFilter(obj, event)
+
     def init_ui(self):
         """
         Initializes the main User Interface components.
@@ -512,8 +461,8 @@ class MainWindow(QMainWindow):
         # --- Left Side: SFTP Container ---
         sftp_container = QWidget()
         sftp_layout = QVBoxLayout(sftp_container)
-        sftp_layout.setContentsMargins(0, 0, 0, 0) # No padding
-        sftp_layout.setSpacing(2) # A little space between path bar and tree
+        sftp_layout.setContentsMargins(0, 0, 0, 0)
+        sftp_layout.setSpacing(2)
 
         # 1. Path Bar
         self.sftp_path_bar = QLineEdit()
@@ -528,7 +477,6 @@ class MainWindow(QMainWindow):
         self.sftp_browser.setColumnWidth(0, 300)
         self.sftp_browser.itemDoubleClicked.connect(self.sftp_item_double_clicked)
         self.sftp_browser.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        # self.sftp_browser.customContextMenuRequested.connect(self.sftp_context_menu)
         sftp_layout.addWidget(self.sftp_browser)
 
         splitter.addWidget(sftp_container)
@@ -540,6 +488,8 @@ class MainWindow(QMainWindow):
 
         self.terminal_output = QTextEdit()
         self.terminal_output.setReadOnly(True)
+        # Clicking focuses input
+        self.terminal_output.mousePressEvent = lambda event: self.terminal_input.setFocus()
         self.terminal_output.setFont(QFont("Monospace", 10))
         self.terminal_output.setStyleSheet("background-color: #1e1e1e; color: #d4d4d4; border: none;")
 
@@ -547,21 +497,18 @@ class MainWindow(QMainWindow):
         self.terminal_input.setFont(QFont("Monospace", 10))
         self.terminal_input.setStyleSheet("background-color: #252526; color: #d4d4d4; border-top: 1px solid #333;")
         self.terminal_input.returnPressed.connect(self.execute_command)
+        self.terminal_input.installEventFilter(self)
 
         terminal_layout.addWidget(self.terminal_output)
         terminal_layout.addWidget(self.terminal_input)
         splitter.addWidget(terminal_widget)
 
-        splitter.setSizes([400, 800]) # Initial size ratio
+        splitter.setSizes([400, 800])
 
-    # --- HELPER: Check if file is text ---
     def is_text_file(self, filename):
-        """Determines if a file is likely safely editable text."""
         base = os.path.basename(filename)
         name, ext = os.path.splitext(base)
-        # Check if the WHOLE filename is in our allowed list (covers Dockerfile AND .bashrc)
         if base.lower() in self.TEXT_FILENAMES: return True
-        # Check if it has an allowed extension (covers test.py)
         if ext.lower() in self.TEXT_EXTENSIONS: return True
         return False
 
@@ -594,6 +541,34 @@ class MainWindow(QMainWindow):
         prompt = f"[{self.current_remote_path}]$ "
         self.terminal_input.setPlaceholderText(prompt)
         self.terminal_output.moveCursor(self.terminal_output.textCursor().MoveOperation.End)
+
+    @pyqtSlot(str)
+    def on_shell_data(self, text):
+        """
+        Appends raw shell output to the terminal window.
+        """
+        # 1. Clean up bracketed paste mode garbage
+        text = text.replace('\x1b[?2004h', '').replace('\x1b[?2004l', '')
+
+        # 2. Strip ANSI escape codes
+        ansi_escape = re.compile(r'\x1b\[[\?0-9;]*[a-zA-Z]')
+        clean_text = ansi_escape.sub('', text)
+
+        # 3. FIX: Stricter Regex for "Glued Prompt" detection
+        # Only splits if it sees "root@" or "ion@" specifically.
+        # This prevents "oot@" fragments from triggering a newline.
+        prompt_regex = r'(?<!\n)((?:root|ion)@[\w.-]+:[~\w/]+[#$])'
+        clean_text = re.sub(prompt_regex, r'\n\1', clean_text)
+
+        cursor = self.terminal_output.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.terminal_output.setTextCursor(cursor)
+
+        self.terminal_output.insertPlainText(clean_text)
+        self.terminal_output.ensureCursorVisible()
+
+        # Ensure input is always enabled
+        self.terminal_input.setEnabled(True)
 
     @pyqtSlot(str, str)
     def on_connection_ready(self, user_host, initial_path):
@@ -632,7 +607,6 @@ class MainWindow(QMainWindow):
             filename = item.filename
             if filename in ('.', '..'): continue
             is_dir = stat.S_ISDIR(item.st_mode)
-            # Updated to use is_text_file for better Type column info
             file_type = "Directory" if is_dir else ("Text File" if self.is_text_file(filename) else "File")
             size = self.format_size(item.st_size) if not is_dir else ""
             permissions = stat.filemode(item.st_mode)
@@ -679,7 +653,6 @@ class MainWindow(QMainWindow):
             new_path = os.path.normpath(os.path.join(self.current_remote_path, data["filename"]))
             self.populate_sftp_browser(new_path)
         else:
-            # Updated double-click logic with text file check
             if self.is_text_file(data["filename"]):
                 QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
                 self.start_get_file_content.emit(data["full_path"])
@@ -697,60 +670,43 @@ class MainWindow(QMainWindow):
 
     def execute_command(self, command_str=None, internal=False):
         command = command_str if command_str is not None else self.terminal_input.text().strip()
-        if not command: return
 
-        if not internal:
-            self.terminal_output.append(f"<font color='#5a90d6'>[{self.current_remote_path}]$ {command}</font>")
-            self.terminal_input.clear()
+        # 1. Clear input immediately
+        self.terminal_input.clear()
 
+        # 2. Check for "Nano/Vim" interception
         blocked_editors = {"nano", "vim", "vi", "emacs"}
         parts = command.split()
 
         if not internal and parts and parts[0] in blocked_editors:
             if len(parts) < 2:
-                 self.terminal_output.append(f"<font color='orange'>Usage: {parts[0]} &lt;filename&gt;</font>")
-                 self.update_terminal_prompt()
-                 return
+                self.terminal_output.append(f"<font color='orange'>Usage: {parts[0]} &lt;filename&gt;</font>")
+                self.update_terminal_prompt()
+                return
 
-            target_file = None
-            for part in parts[1:]:
-                 if not part.startswith('-'):
-                      target_file = part
-                      break
+            # Extract filename
+            target_file = parts[1] # Simple extraction
 
-            if target_file:
-                 # Updated interception logic with text file check
-                 if self.is_text_file(target_file):
-                      full_path = os.path.normpath(os.path.join(self.current_remote_path, target_file))
-                      self.terminal_output.append(f"Opening {target_file} in internal editor...")
-                      QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-                      self.start_get_file_content.emit(full_path)
-                      return
-                 else:
-                      self.terminal_output.append(f"<font color='orange'>Warning: {target_file} is not in approved text extensions list. Running normally in terminal.</font>")
+            # --- THE FIX: FORCE GUI OPEN ---
+            # We no longer check is_text_file() here. If you typed nano, we open the GUI.
+            full_path = os.path.normpath(os.path.join(self.current_remote_path, target_file))
 
-        self.terminal_input.setEnabled(False)
+            self.terminal_output.append(f"Opening {target_file} in MobaTuxTerm Editor...")
+
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.start_get_file_content.emit(full_path)
+
+            # CRITICAL: Return here so we NEVER send 'nano' to the raw terminal
+            return
+
+        # 3. If not intercepted, send to the server
         self.start_run_command.emit(command, self.current_remote_path)
 
-    def download_item(self, item):
-        data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data: return
-
-        if data["is_dir"]:
-             QMessageBox.warning(self, "Not Implemented", "Recursive dir download is a big task! Let's do files first.")
-             return
-        else:
-            remote_path = data["full_path"]
-            filename = data["filename"]
-            local_dest, _ = QFileDialog.getSaveFileName(self, "Save File", os.path.join(self.local_path, filename))
-            if local_dest:
-                 self.download_file_with_progress(remote_path, local_dest)
+        # 4. Keep focus
+        self.terminal_input.setFocus()
 
     @pyqtSlot(str)
     def on_update_available(self, new_version):
-        """
-        SLOT: Called if the UpdateChecker finds a newer version.
-        """
         reply = QMessageBox.question(
             self,
             "Update Available",
@@ -762,11 +718,9 @@ class MainWindow(QMainWindow):
             self.start_app_update()
 
     def start_app_update(self):
-        """Starts the updater thread."""
         self.update_progress_dialog = QProgressDialog("Updating MobaTuxTerm...", None, 0, 100, self)
         self.update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
         self.update_progress_dialog.setMinimumDuration(0)
-        # Disable cancel button for safety during generic update
         self.update_progress_dialog.setCancelButton(None)
 
         self.app_updater = AppUpdater()
@@ -779,8 +733,6 @@ class MainWindow(QMainWindow):
         self.update_progress_dialog.close()
         if success:
              QMessageBox.information(self, "Update Complete", message)
-             # Optional: Close app automatically?
-             # QApplication.quit()
         else:
              QMessageBox.critical(self, "Update Failed", message)
 
@@ -788,7 +740,7 @@ class MainWindow(QMainWindow):
         filename = os.path.basename(remote_path)
         progress = QProgressDialog(f"Downloading {filename}...", "Cancel", 0, 100, self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0) # Show immediately
+        progress.setMinimumDuration(0)
 
         self.worker.file_progress.connect(
             lambda fn, pct: progress.setValue(pct) if fn == filename else None
@@ -898,6 +850,6 @@ if __name__ == "__main__":
     app_icon = QIcon(os.path.join(APP_ROOT_DIR, "mobatuxtermfiles", "ionos-logo.png"))
     app.setWindowIcon(app_icon)
     app.setStyleSheet(IONOS_DARK_THEME)
-    window = MainWindow() # This now handles the session dialog
-    window.show()         # Always show the window
-    sys.exit(app.exec())   # Start the application event loop
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
